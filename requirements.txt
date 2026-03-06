@@ -1,3 +1,11 @@
+streamlit
+zhipuai
+requests
+python-dotenv
+python-docx
+feedparser
+pymupdf
+sniffio
 streamlit>=1.34.0
 zhipuai>=2.0.0
 python-dotenv>=1.0.0
