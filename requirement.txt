@@ -6,3 +6,4 @@ python-docx
 feedparser
 pymupdf
 sniffio
+google-search-results

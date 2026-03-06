@@ -6,6 +6,7 @@ python-docx
 feedparser
 pymupdf
 sniffio
+google-search-results
 streamlit>=1.34.0
 zhipuai>=2.0.0
 python-dotenv>=1.0.0

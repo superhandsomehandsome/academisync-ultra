@@ -1,10 +1,12 @@
 import os
 import time
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Tuple
 
 import requests
 import feedparser  # 用于解析 arXiv 数据
+from serpapi import GoogleSearch  # SerpApi 官方客户端
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -223,6 +225,97 @@ def fetch_papers(query: str, limit: int = 5) -> List[Dict]:
     except Exception as e:
         print(f"[警告] 主引擎连接异常: {e}，尝试备用引擎...")
         return fetch_from_arxiv(query, limit)
+
+
+def fetch_chinese_papers(query: str, limit: int = 5) -> List[Dict]:
+    """
+    中文文献引擎：通过 SerpApi 调用 Google Scholar（中文界面）。
+
+    说明：
+    - 需要在环境变量或 .env 中配置 SERPAPI_KEY（兼容旧名 SERPAPI_API_KEY）；
+    - 若未配置或请求失败，则返回空列表，不影响英文检索。
+    """
+    query = (query or "").strip()
+    if not query:
+        return []
+
+    # 优先使用新名字 SERPAPI_KEY，兼容旧的 SERPAPI_API_KEY
+    api_key = os.getenv("SERPAPI_KEY") or os.getenv("SERPAPI_API_KEY")
+    if not api_key:
+        print("[提示] 未配置 SERPAPI_KEY，中文检索暂时跳过。")
+        return []
+
+    params = {
+        "engine": "google_scholar",
+        "q": query,
+        "hl": "zh-CN",  # 强制中文界面
+        "num": max(1, limit),
+        "api_key": api_key,
+    }
+
+    try:
+        print(f"[检索] 通过 SerpApi (Google Scholar 中文) 检索: {query} ...")
+        search = GoogleSearch(params)
+        data = search.get_dict() or {}
+        results: List[Dict] = []
+        for item in data.get("organic_results", [])[:limit]:
+            title = (item.get("title") or "").strip()
+            snippet = (item.get("snippet") or "").replace("\n", " ").strip()
+            url = (item.get("link") or "").strip()
+            pub_info = (item.get("publication_info") or {}) or {}
+            summary = (pub_info.get("summary") or "").strip()
+            year = "N/A"
+            m = re.search(r"(19|20)\\d{2}", summary)
+            if m:
+                year = m.group(0)
+            if not title:
+                continue
+            results.append(
+                {
+                    "title": title,
+                    "abstract": snippet or summary,
+                    "url": url,
+                    "year": year,
+                    "source": "SerpApi-GoogleScholar-zh",
+                }
+            )
+        return results
+    except Exception as e:
+        print(f"[警告] 中文引擎（SerpApi Google Scholar）调用失败：{e}")
+        return []
+
+
+def fetch_academic_papers(
+    query: str, languages: List[str] | None = None, limit: int = 5
+) -> List[Dict]:
+    """
+    双语检索入口：
+    - languages 包含 "en" 时：使用 Semantic Scholar + arXiv；
+    - languages 包含 "zh" 时：使用 SerpApi Google Scholar（中文界面）；
+    - 最后按标题去重。
+    """
+    query = (query or "").strip()
+    if not query:
+        return []
+
+    if not languages:
+        languages = ["en", "zh"]
+
+    all_results: List[Dict] = []
+    if "en" in languages:
+        all_results.extend(fetch_papers(query, limit))
+    if "zh" in languages:
+        all_results.extend(fetch_chinese_papers(query, limit))
+
+    # 按标题去重
+    unique_map: Dict[str, Dict] = {}
+    for p in all_results:
+        title = (p.get("title") or "").strip()
+        if not title:
+            continue
+        if title not in unique_map:
+            unique_map[title] = p
+    return list(unique_map.values())
 
 
 def fetch_papers_for_keywords(

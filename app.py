@@ -18,6 +18,11 @@ st.set_page_config(page_title="AcademiSync Ultra", layout="wide")
 st.title("🎓 全自动学术研究系统")
 
 # 侧边栏：API Key 与参数
+SEARCH_LANG_OPTIONS = [
+    "中文 (SerpApi/百度学术替代)",
+    "英文 (Semantic Scholar/arXiv)",
+]
+
 with st.sidebar:
     st.header("配置")
     default_key = os.getenv("ZHIPUAI_API_KEY", "")
@@ -27,6 +32,12 @@ with st.sidebar:
         "上传参考文献（最多10篇，PDF/Word 优先用于实验数据与术语）",
         type=["pdf", "docx", "txt", "md"],
         accept_multiple_files=True,
+    )
+    st.header("🔍 搜索配置")
+    search_lang = st.multiselect(
+        "检索语言选择",
+        SEARCH_LANG_OPTIONS,
+        default=SEARCH_LANG_OPTIONS,
     )
     show_debug = st.checkbox("显示调试信息", value=False)
     gen_abstract = st.checkbox("生成摘要（置于文首，对齐范例综述）", value=True)
@@ -61,6 +72,18 @@ def save_draft_state(state: dict) -> None:
 
 if "chapters" not in st.session_state:
     st.session_state.chapters = {}
+
+
+def _resolve_lang_codes(selection):
+    langs: list[str] = []
+    if "中文 (SerpApi/百度学术替代)" in selection:
+        langs.append("zh")
+    if "英文 (Semantic Scholar/arXiv)" in selection:
+        langs.append("en")
+    if not langs:
+        # 默认至少保留英文检索，避免完全无结果
+        langs = ["en"]
+    return langs
 
 
 if st.button("🚀 启动全链路写作", type="primary"):
@@ -109,10 +132,14 @@ if st.button("🚀 启动全链路写作", type="primary"):
             seen.add(k.lower())
             search_keywords.append(k)
 
+        lang_codes = _resolve_lang_codes(search_lang)
+
         for kw in search_keywords:
             st.write(f"🔍 正在检索核心概念: {kw}...")
             try:
-                results = researcher.fetch_papers(kw, limit=num_papers)
+                results = researcher.fetch_academic_papers(
+                    kw, languages=lang_codes, limit=num_papers
+                )
             except Exception as e:
                 st.warning(f"检索关键词 {kw} 时出现错误：{e}")
                 results = []
