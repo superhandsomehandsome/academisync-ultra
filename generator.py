@@ -1,13 +1,18 @@
 import os
 import json
+from pathlib import Path
 from zhipuai import ZhipuAI
 from dotenv import load_dotenv
 
-load_dotenv()
+# 强制加载项目根目录 .env
+_env_path = Path(__file__).resolve().parent / ".env"
+load_dotenv(dotenv_path=_env_path, override=True)
 
 # 学术规范模板（参考《中药药理与临床》等期刊）
 ACADEMIC_TEMPLATE = """
 撰写规范参考《中药药理与临床》期刊：
+【写作语言】全文必须使用专业学术中文撰写正文，除必要的专业名词英文缩写（如 NF-κB、NLRP3、ALI 等）外，严禁输出英文句子或整段英文正文；如需使用英文文献结论，须先译为严格、规范的中文再写入正文。
+【引用规范】正文仅使用 [n] 引用（如 [1]、[2]），禁止在正文中出现 URL。文末必须自动生成 ## 参考文献与溯源 章节，每条格式为 [n] [标题](URL) - 来源 (年份)，确保点击标题可跳转原文。
 1. 引言：必须交代背景、临床痛点（如肺纤维化的高死亡率）及中药干预的必要性。
 2. 作用机制：必须深入到分子水平。禁止只说“减轻炎症”，必须说明“通过抑制XX磷酸化，阻断XX核转位”。
 3. 信号通路：重点讨论 TLR4/NF-κB、TGF-β1/Smad、Nrf2、NLRP3 等关键路径，并结合“肠道菌群-肺轴”相关通路。
@@ -28,13 +33,15 @@ CRITICAL_STRUCTURE = """
 REVIEW_QUALITY_TEMPLATE = """
 【综述范例写作规范】请严格模仿《基于肠道菌群及其代谢产物探讨中药干预急性肺损伤的研究现状》《肠道菌群与急性肺损伤关系的研究进展》《肠道菌群在肺部疾病中的作用机制与潜在治疗价值》《3D打印器官芯片研究进展》《肺部疾病潜在靶点研究进展》等已发表综述的写法：
 
+【语言风格】必须使用严谨的学术中文撰写全文，整体遣词造句要贴近上述中文综述风格（例如使用“探讨”“阐明/阐述”“肺与大肠相表里”“辨证论治”“机制研究”“研究现状与展望”等典型表达），禁止输出整段英文或英文句子；对于英文文献，只在括号或引用处保留作者姓名或 [n] 索引，其余内容必须先翻译为地道中文再写入正文。
+
 1. 术语规范：专业术语首次出现时必须写“中文全称（英文全称，英文缩写）”，例如：急性肺损伤（acute lung injury，ALI）、短链脂肪酸（short chain fatty acids，SCFAs）、核转录因子κB（nuclear factor kappa B，NF-κB）、Toll样受体4（TLR4）。后文可仅用缩写或中文。
 
 2. 引用格式：文中每个观点或数据必须对应文献，使用 [1]、[2] 或“作者等[3]”“Tang等[10]”形式，严禁编造未在参考文献中出现的引用。表述示例：“有研究发现[6]……”“汪玉磊等[11]利用……表明……”。
 
 3. 段落逻辑：每段采用“总起句 → 具体研究/数据支撑 → 机制或小结”。涉及机制时必须写到分子/通路层面，例如“通过抑制NF-κB磷酸化”“上调TLR4/NF-κB信号通路中间产物”“厚壁菌门/拟杆菌门比例升高”“SCFAs通过……影响肺泡巨噬细胞极化”。
 
-4. 中西医结合写法：对中文文献（标题或摘要为中文），突出中医理论基础、证型划分（如“气阴两虚”“痰瘀互结”等）及中药方剂/有效成分；对英文文献（标题/摘要为英文），重点整合其报道的具体通路（如 TGF-β1/Smad、NLRP3、NF-κB）、分子靶点和实验数据，并在综述中用中文准确叙述，使“中药干预-肠道菌群-信号通路-靶器官”形成完整链条。
+4. 中西医结合写法：对中文文献（标题或摘要为中文），突出中医理论基础、证型划分（如“气阴两虚”“痰瘀互结”等）及中药方剂/有效成分；对英文文献（标题/摘要为英文），重点整合其报道的具体通路（如 TGF-β1/Smad、NLRP3、NF-κB）、分子靶点和实验数据，并在综述中用中文准确叙述，使“中药干预-肠道菌群-信号通路-靶器官”形成完整链条；英文文献中的结论需先在段落中用规范中文表述，仅在括号中附上作者或 [n]。
 
 5. 结构一致：各节若有多个子主题，用 2.1、2.2 或加粗小标题区分；可适当在段首用“一是……二是……”“此外，”等衔接词，使层次清晰。
 
@@ -44,6 +51,32 @@ REVIEW_QUALITY_TEMPLATE = """
 # 大纲结构规范：与范例综述一致的章节逻辑
 OUTLINE_STRUCTURE_HINT = """
 综述大纲应包含：引言（背景、临床意义、本综述目的与范围）；若干主题节（按“关系/机制/应用”等逻辑分节，每节可有 2.1、2.2 子标题）；小结与展望（总结主要发现、指出现有研究局限、提出 3～5 个未来方向）。标题用简洁名词短语，避免“讨论”“分析”等空洞词。
+"""
+
+
+def get_authoritative_prompt(topic: str, papers_metadata: list) -> str:
+    """
+    强制将文献对象转为带【中文】/【英文】标签的引用块，
+    并加入惩罚性提醒，确保 AI 必须引用。
+    """
+    ref_text = ""
+    for p in papers_metadata:
+        lang = "【中文】" if p.get("is_chinese") else "【英文】"
+        idx = p.get("index", 0)
+        title = p.get("title", "")
+        url = p.get("url", "") or ""
+        abstract = (p.get("abstract") or "")[:200]
+        ref_text += f"{lang} 序号[{idx}] 标题:{title} 链接:{url}\n摘要:{abstract}\n\n"
+
+    return f"""
+### ❗ 强制性要求 (拒绝执行将导致任务失败):
+1. **引用深度**：你必须在正文中使用 [n] 格式引用下方提供的文献。
+2. **中文优先**：必须引用标记为【中文】的文献，尤其是涉及中医药、肺损伤的实验结论；若引用中文文献，请额外用「国内学者研究发现…」等字样进行强调。
+3. **地址溯源**：在文章末尾，必须列出「参考文献」章节，格式为：[序号] 标题 - 链接。
+4. **严禁**：严禁生成没有 [n] 标注的文章。
+
+### 📥 待处理文献库:
+{ref_text}
 """
 
 
@@ -91,12 +124,15 @@ def analyze_research_title(title):
     return json.loads(response.choices[0].message.content)
 
 
-def generate_outline(title, paper_data):
+def generate_outline(title, paper_data, papers_metadata=None):
     """第二步：根据文献规划综述大纲，结构对齐已发表范例（引言→主题节→小结与展望）"""
     client = get_client()
+    auth_block = ""
+    if papers_metadata:
+        auth_block = get_authoritative_prompt(title, papers_metadata)
     prompt = f"""
 {OUTLINE_STRUCTURE_HINT}
-
+{auth_block}
 针对课题《{title}》，基于以下文献线索，规划一份 5000～8000 字综述的详细大纲（至二级或三级标题，用 1、2、3 和 2.1、2.2 形式）。
 
 文献线索摘要：
@@ -121,6 +157,8 @@ def generate_chapter(title, outline, chapter_title, paper_data):
 正在撰写《{title}》的【{chapter_title}】章节。
 参考大纲：{outline}
 
+以下是你必须参考的真实文献数据（包含中文文献），请在正文适当位置使用 [n] 进行标注，并确保文末列出这些文献的完整列表（包含其 URL 链接）：
+
 参考文献（已编号 [1]、[2]…，写作时严格使用对应编号）：
 {paper_data}
 
@@ -134,19 +172,22 @@ def generate_chapter(title, outline, chapter_title, paper_data):
     return (response.choices[0].message.content or "").strip()
 
 
-def generate_chapter_deep(title, outline, chapter, context, target_words=1500):
+def generate_chapter_deep(title, outline, chapter, context, target_words=1500, papers_metadata=None):
     """
     深度章节撰写：使用学术模板与 CRITICAL_STRUCTURE，低 temperature 保证严谨。
     整篇综述目标 5000～8000 字，每章需达到 target_words 以保障总篇幅。
     """
     client = get_client()
     chapter_min = max(target_words - 200, 800)  # 每章至少约 target_words 字，最低 800
+    auth_block = ""
+    if papers_metadata:
+        auth_block = get_authoritative_prompt(title, papers_metadata)
 
     prompt = f"""
 {ACADEMIC_TEMPLATE}
 {CRITICAL_STRUCTURE}
 {REVIEW_QUALITY_TEMPLATE}
-
+{auth_block}
 任务：撰写综述《{title}》中的「{chapter}」章节。
 本综述目标总字数 5000～8000 字，各章需充实展开以达成该篇幅。
 参考大纲：{outline}

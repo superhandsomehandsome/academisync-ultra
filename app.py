@@ -1,19 +1,61 @@
 import os
-import json
-from io import BytesIO
 
 import streamlit as st
 from dotenv import load_dotenv
+
+# 1. 优先从 Streamlit Secrets 读取（Streamlit Cloud 云端环境）
+# 2. 否则加载本地 .env（本地开发环境）
+try:
+    if "SERPAPI_KEY" in st.secrets:
+        os.environ["SERPAPI_KEY"] = st.secrets["SERPAPI_KEY"]
+        if "ZHIPUAI_API_KEY" in st.secrets:
+            os.environ["ZHIPUAI_API_KEY"] = st.secrets["ZHIPUAI_API_KEY"]
+except Exception:
+    pass
+if not os.getenv("SERPAPI_KEY"):
+    _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    load_dotenv(dotenv_path=_env_path, override=True)
+
+import json
+from pathlib import Path
+from io import BytesIO
+
 from docx import Document
+
+_path_obj = Path(__file__).resolve().parent / ".env"
+
+
+def _ensure_env_loaded():
+    """若 dotenv 未生效，直接读取 .env 并写入 os.environ（兼容 Streamlit 多进程）"""
+    if os.getenv("SERPAPI_KEY") or os.getenv("SERPAPI_API_KEY"):
+        return
+    if not _path_obj.exists():
+        return
+    for enc in ("utf-8", "utf-8-sig", "gbk"):
+        try:
+            for line in _path_obj.read_text(encoding=enc).splitlines():
+                line = line.strip()
+                if "=" in line and not line.startswith("#"):
+                    key, _, val = line.partition("=")
+                    key, val = key.strip(), val.strip().strip('"').strip("'")
+                    if key and val:
+                        os.environ[key] = val
+            break
+        except Exception:
+            continue
+
+
+_ensure_env_loaded()
 
 import researcher
 import generator
 from citation_utils import check_citations
 from document_processor import AcademicBrain
 
-load_dotenv()
-
 st.set_page_config(page_title="AcademiSync Ultra", layout="wide")
+
+if not os.getenv("SERPAPI_KEY"):
+    st.error("⚠️ 未检测到 SerpApi 密钥，请在后台配置 Secrets 或本地 .env 文件")
 
 st.title("🎓 全自动学术研究系统")
 
@@ -24,7 +66,10 @@ SEARCH_LANG_OPTIONS = [
 ]
 
 with st.sidebar:
+    _ensure_env_loaded()
     st.header("配置")
+    serp_ready = bool(os.getenv("SERPAPI_KEY") or os.getenv("SERPAPI_API_KEY"))
+    st.caption(f"SerpApi: {'✅ 已配置' if serp_ready else '❌ 未配置'}")
     default_key = os.getenv("ZHIPUAI_API_KEY", "")
     api_key = st.text_input("智谱 API Key", value=default_key, type="password")
     num_papers = st.slider("每个关键词检索篇数", 3, 20, 5)
@@ -87,6 +132,7 @@ def _resolve_lang_codes(selection):
 
 
 if st.button("🚀 启动全链路写作", type="primary"):
+    _ensure_env_loaded()  # 确保 .env 在 Streamlit 多进程下也能被正确加载
     if not research_title:
         st.error("请输入标题")
         st.stop()
@@ -103,62 +149,76 @@ if st.button("🚀 启动全链路写作", type="primary"):
         if not en_keywords:
             en_keywords = [research_title]
 
-        # 2. 自动化多路搜索
-        st.write("📡 正在全网检索相关文献（双引擎驱动）...")
-        all_papers = []
+        # 2. 自动化多路搜索（强制中英双轨，中文优先）
+        st.write("🔍 正在启动中英双轨强力检索...")
         # 检索用词备用映射（提高 Semantic Scholar/arXiv 命中率）
         _search_aliases = {
             "chinese herbal medicine": "traditional Chinese medicine",
             "intestinal microbiota": "gut microbiota",
             "intestinal flora": "gut microbiota",
         }
-
         def _expand_keyword(k: str):
             k_lower = (k or "").strip().lower()
             if k_lower in _search_aliases:
                 return [k, _search_aliases[k_lower]]
             return [k]
-
         keywords_to_try = []
         for kw in en_keywords:
             keywords_to_try.extend(_expand_keyword(kw))
-        # 去重且保持顺序
-        seen = set()
+        seen_kw = set()
         search_keywords = []
         for k in keywords_to_try:
             k = (k or "").strip()
-            if not k or k.lower() in seen:
+            if not k or k.lower() in seen_kw:
                 continue
-            seen.add(k.lower())
+            seen_kw.add(k.lower())
             search_keywords.append(k)
 
-        lang_codes = _resolve_lang_codes(search_lang)
+        # 调用 researcher.fetch_all_papers（第一要务：中文文献）
+        all_papers = researcher.fetch_all_papers(
+            research_title.strip(),
+            en_keywords=search_keywords,
+            limit=num_papers,
+        )
 
-        for kw in search_keywords:
-            st.write(f"🔍 正在检索核心概念: {kw}...")
-            try:
-                results = researcher.fetch_academic_papers(
-                    kw, languages=lang_codes, limit=num_papers
-                )
-            except Exception as e:
-                st.warning(f"检索关键词 {kw} 时出现错误：{e}")
-                results = []
-            all_papers.extend(results or [])
-
-        # 首轮无结果时用备用词再试一次
-        if not all_papers and en_keywords:
-            st.write("📡 首轮无结果，正在用备用检索词重试...")
-            for alt in ["gut microbiota", "pulmonary fibrosis", "acute lung injury", "traditional Chinese medicine"]:
-                if alt.lower() in seen:
+        # 兜底：若无中文文献，多轮重试不同检索变体（中文为第一要务）
+        chinese_papers = [p for p in all_papers if p.get("is_chinese")]
+        if not chinese_papers:
+            st.write("⚠️ 首轮无中文文献，正在多轮破冰重试...")
+            for q_try in [
+                research_title.strip(),
+                research_title.replace("研究", "").replace("探讨", "").strip()[:15],
+                research_title[:10],
+            ]:
+                if not q_try.strip():
                     continue
-                st.write(f"🔍 备用检索: {alt}...")
-                try:
-                    results = researcher.fetch_papers(alt, limit=num_papers)
-                    all_papers.extend(results or [])
-                except Exception:
-                    pass
+                extra = researcher.fetch_chinese_papers(q_try, limit=8)
+                for p in extra:
+                    if p.get("title") and not any(x.get("title") == p.get("title") for x in all_papers):
+                        p["is_chinese"] = True
+                        all_papers.append(p)
+                if any(p.get("is_chinese") for p in all_papers):
+                    st.success(f"✅ 备用检索成功，获得 {len(extra)} 篇中文文献")
+                    break
 
-        # 本地文献：PDF/Word 用 AcademicBrain 解析，txt/md 并入 all_papers
+        if not any(p.get("is_chinese") for p in all_papers) and all_papers:
+            st.warning("⚠️ 当前仅检索到英文文献，未找到中文文献。建议：1) 检查 SERPAPI_KEY；2) 使用更具体的中文关键词；3) 上传中文 PDF/Word 作为补充。")
+
+        # 终极兜底：若 SerpApi 全失败导致 0 条，尝试 Semantic Scholar/arXiv（无需 SerpApi）
+        if not all_papers:
+            st.write("⚠️ SerpApi 未返回结果，尝试 Semantic Scholar + arXiv...")
+            try:
+                for kw in search_keywords[:3]:
+                    en_res = researcher.fetch_papers(kw, limit=5)
+                    for p in en_res or []:
+                        if p.get("title") and not any(x.get("title") == p.get("title") for x in all_papers):
+                            p["is_chinese"] = False
+                            all_papers.append(p)
+            except Exception as e:
+                if show_debug:
+                    st.warning(f"英文兜底失败: {e}")
+
+        st.session_state.all_results = all_papers
         local_context = ""
         if uploaded_files:
             pdf_docx = [f for f in uploaded_files if (f.name or "").lower().endswith((".pdf", ".docx"))]
@@ -198,31 +258,73 @@ if st.button("🚀 启动全链路写作", type="primary"):
 
         if not unique_papers and not local_context:
             status.update(
-                label="❌ 所有数据库均未找到结果且无本地文献，请更换关键词或上传 PDF/Word。", state="error"
+                label="❌ 未检索到任何文献（含中文）。",
+                state="error",
             )
+            st.error("未检索到任何文献（含中文）。")
+            with st.expander("🔧 故障排查", expanded=True):
+                serp_ok = bool(os.getenv("SERPAPI_KEY") or os.getenv("SERPAPI_API_KEY"))
+                st.write(f"**SERPAPI_KEY**: {'✅ 已配置' if serp_ok else '❌ 未配置'}")
+                st.write("**建议**：")
+                st.write("1. 确认 `.env` 中存在 `SERPAPI_KEY=你的密钥`（可在 [serpapi.com](https://serpapi.com) 获取）")
+                st.write("2. 使用更具体的中文关键词，如「中药 肠道菌群 肺损伤」")
+                st.write("3. 上传 PDF/Word 文献，系统将直接解析作为参考")
             st.stop()
 
         if unique_papers:
-            st.success(f"✅ 找到 {len(unique_papers)} 篇高度相关的参考资料！")
+            zh_n = sum(1 for p in unique_papers if p.get("is_chinese"))
+            en_n = len(unique_papers) - zh_n
+            detail = f"（中文 {zh_n} 篇，英文 {en_n} 篇）" if zh_n and en_n else ""
+            st.success(f"✅ 找到 {len(unique_papers)} 篇高度相关的参考资料！{detail}")
         if local_context:
             st.success("✅ 已加载本地文献精华，生成时将优先参考其实验数据、逻辑与术语。")
 
+        # 在 UI 中展示可点击的中英文文献溯源表
+        if unique_papers:
+            with st.expander("📚 参考文献溯源列表 (点击标题跳转)", expanded=True):
+                for i, p in enumerate(unique_papers, 1):
+                    st.markdown(f"**[{i}] [{p.get('title', '无标题')}]({p.get('url', '#')})**")
+                    lang_tag = "【中文】" if p.get("is_chinese") else "【英文】"
+                    st.caption(f"{lang_tag} 来源: {p.get('source', '未知')} | 年份: {p.get('year', 'N/A')}")
+                    with st.expander("查看摘要预览"):
+                        st.write(p.get("abstract", "暂无摘要"))
+                    st.divider()
+
         context_data = ""
-        ref_list = "### 📚 参考文献\n"
+        ref_list = "## 参考文献与溯源\n\n"
         if local_context:
             context_data = local_context + "\n\n【在线检索文献】\n"
         for i, p in enumerate(unique_papers, 1):
-            context_data += (
-                f"[{i}] 标题: {p.get('title', '')}, 摘要: {p.get('abstract', '无')}\n"
-            )
-            ref_list += (
-                f"{i}. {p.get('title', '')}. ({p.get('year', 'N/A')}). "
-                f"[链接]({p.get('url', '')})\n"
-            )
+            title = (p.get("title") or "").strip()
+            abstract = p.get("abstract", "无")
+            url = (p.get("url") or "").strip()
+            year = str(p.get("year", "N/A"))
+            source = p.get("source", "") or "在线文献"
+
+            context_data += f"[{i}] 标题: {title}, 摘要: {abstract}\n"
+
+            # 文末溯源表：仅在文末统一列出可点击链接，正文中不直接出现 URL
+            source_label = "本地文献" if source == "local" else source
+            if url:
+                ref_list += f"[{i}] [{title}]({url}) - {source_label} ({year})\n"
+            else:
+                ref_list += f"[{i}] {title} - {source_label} ({year})\n"
+
+        # 构建文献元数据供权威引用 prompt 使用（含 index、is_chinese）
+        papers_metadata = [
+            {
+                "index": i,
+                "title": p.get("title", ""),
+                "url": p.get("url", "") or "",
+                "abstract": p.get("abstract", "") or "",
+                "is_chinese": p.get("is_chinese", False),
+            }
+            for i, p in enumerate(unique_papers, 1)
+        ]
 
         # 3. 规划与写作（支持断点续写）
         st.write("📋 正在生成或更新万字学术大纲...")
-        outline = generator.generate_outline(research_title, context_data)
+        outline = generator.generate_outline(research_title, context_data, papers_metadata)
 
         # 加载历史章节进度
         draft_state = load_draft_state()
@@ -265,7 +367,8 @@ if st.button("🚀 启动全链路写作", type="primary"):
                     )
                 chapter_context = context_data + chapter_extra
                 chapter_text = generator.generate_chapter_deep(
-                    research_title, outline, dim, chapter_context, target_words
+                    research_title, outline, dim, chapter_context, target_words,
+                    papers_metadata=papers_metadata,
                 )
                 chapters[dim] = chapter_text
                 draft_state["chapters"] = chapters
