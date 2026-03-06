@@ -5,3 +5,4 @@ python-dotenv
 python-docx
 feedparser
 pymupdf
+sniffio
