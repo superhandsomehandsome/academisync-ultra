@@ -1,0 +1,7 @@
+streamlit
+zhipuai
+requests
+python-dotenv
+python-docx
+feedparser
+pymupdf

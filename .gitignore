@@ -1,0 +1,28 @@
+# 切勿提交：API Key 与本地配置
+.env
+.env.local
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+env/
+
+# 本地草稿与状态（含用户数据）
+draft_state.json
+temp_draft.md
+temp/
+
+# IDE / 编辑器
+.idea/
+.vscode/
+.cursor/
+
+# 系统与临时
+.DS_Store
+Thumbs.db
+*.log
